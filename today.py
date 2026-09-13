@@ -174,12 +174,6 @@ def loc_counter_one_repo(owner, repo_name, data, cache_comment, history, additio
 
 
 def loc_query(owner_affiliation, comment_size=0, force_cache=False, cursor=None, edges=[]):
-    """
-    Uses GitHub's GraphQL v4 API to query all the repositories I have access to (with respect to owner_affiliation)
-    Queries 60 repos at a time, because larger queries give a 502 timeout error and smaller queries send too many
-    requests and also give a 502 error.
-    Returns the total number of lines of code in all repositories
-    """
     query_count('loc_query')
     query = '''
     query ($owner_affiliation: [RepositoryAffiliation], $login: String!, $cursor: String) {
@@ -209,12 +203,20 @@ def loc_query(owner_affiliation, comment_size=0, force_cache=False, cursor=None,
         }
     }'''
     variables = {'owner_affiliation': owner_affiliation, 'login': USER_NAME, 'cursor': cursor}
-    request = simple_request(loc_query.__name__, query, variables)
-    if request.json()['data']['user']['repositories']['pageInfo']['hasNextPage']:   # If repository data has another page
-        edges += request.json()['data']['user']['repositories']['edges']            # Add on to the LoC count
-        return loc_query(owner_affiliation, comment_size, force_cache, request.json()['data']['user']['repositories']['pageInfo']['endCursor'], edges)
+    request = requests.post('https://api.github.com/graphql', json={'query': query, 'variables':variables}, headers=HEADERS)
+    result = request.json()
+    if request.status_code != 200:
+        raise Exception(loc_query.__name__, ' has failed with a', request.status_code, request.text, QUERY_COUNT)
+    # tolerate per-edge FORBIDDEN errors instead of crashing
+    if 'errors' in result:
+        for err in result['errors']:
+            if err.get('type') != 'FORBIDDEN':
+                raise Exception(loc_query.__name__, 'GraphQL error:', err)
+    if result['data']['user']['repositories']['pageInfo']['hasNextPage']:
+        edges += result['data']['user']['repositories']['edges']
+        return loc_query(owner_affiliation, comment_size, force_cache, result['data']['user']['repositories']['pageInfo']['endCursor'], edges)
     else:
-        return cache_builder(edges + request.json()['data']['user']['repositories']['edges'], comment_size, force_cache)
+        return cache_builder(edges + result['data']['user']['repositories']['edges'], comment_size, force_cache)
 
 
 def cache_builder(edges, comment_size, force_cache, loc_add=0, loc_del=0):
